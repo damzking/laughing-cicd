@@ -1,0 +1,84 @@
+name: Deploy to AWS EC2 using ECR
+
+on:
+  push:
+    branches:
+      # - main
+      # - staging
+      - develop
+
+env:
+  AWS_REGION: "eu-west-1"
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+  AWS_ECR_REPOSITORY_NAME: ${{ secrets.AWS_ECR_REPOSITORY_NAME }}
+
+concurrency:
+  group: ${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Step 2: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 3: Login to AWS ECR
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Step 4: Build and Push Docker Image to ECR
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.AWS_ECR_REPOSITORY }}/${{ env.AWS_ECR_REPOSITORY_NAME }}:${{ github.sha }}
+
+  deploy_to_staging:
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 5: Deploy to EC2 Instance
+      - name: Deploy to EC2 Staging 🚀
+        uses: appleboy/ssh-action@master
+        if: github.ref == 'refs/heads/develop'
+        with:
+          host: ${{ secrets.SSH_STAGING_HOST }}
+          username: ${{ secrets.SSH_STAGING_USER }}
+          password: ${{ secrets.SSH_STAGING_SECRET }}
+          script: |
+            set -ex
+            export IMAGE_TAG=${{ github.sha }}
+            cd ~/api
+            
+            # Login to AWS ECR
+            aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR_REPOSITORY }}
+            
+            # Pull latest Docker image
+            docker compose pull api
+            
+            # Stop running containers and remove orphans
+            docker compose down -v --remove-orphans
+            
+            # Recreate and start containers
+            docker compose up -d --force-recreate api
+            
+            # Clean up old Docker images
+            docker image prune -af
